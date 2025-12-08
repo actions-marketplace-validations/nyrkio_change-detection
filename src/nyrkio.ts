@@ -5,7 +5,13 @@
 import { Benchmark, BenchmarkResult, Commit, NyrkioJsonPath, NyrkioJson, NyrkioMetrics } from './extract';
 import { Config } from './config';
 import * as core from '@actions/core';
-import axios from 'axios';
+import axios, { AxiosError } from 'axios';
+import { challengePublishHandshake } from './notoken';
+
+function notUsed(someVar: string): string {
+    // We thank typescript for this meditative routine...
+    return someVar;
+}
 
 export interface NyrkioChangePoint {
     metric: string;
@@ -38,15 +44,22 @@ export interface NyrkioAllChanges {
     changes: NyrkioChanges[];
 }
 
-export function sanitizeForUri(value: string | undefined): string {
+export function sanitizeForUri(value: string | undefined, tool: string): string {
     const v: string = value ?? '';
     const re = /[^a-zA-Z0-9-_.\/]/gi;
     const clean = v.replace(re, '_');
-    return clean.length <= 50 ? clean : clean.substring(0, 50);
+    if (clean.length <= 50) {
+        return clean;
+    }
+    if (tool === 'jmh') {
+        return clean.substring(clean.length - 50);
+    } else {
+        return clean.substring(0, 50);
+    }
 }
 
 export function nyrkioJsonMetricsInit(b: BenchmarkResult): NyrkioMetrics {
-    const NYRKIO_JSON_TEMPLATE_METRICS = { name: b.name, unit: b.unit, value: b.value };
+    const NYRKIO_JSON_TEMPLATE_METRICS = { name: b.name, unit: b.unit, value: b.value, direction: b.direction };
     return NYRKIO_JSON_TEMPLATE_METRICS;
 }
 
@@ -75,8 +88,12 @@ export function nyrkioJsonInit(commit: Commit, buildTime: number): NyrkioJson {
 //     return d.getTime() / 1000;
 // }
 
-function convertDateStringToUnixTimestamp(d: string) {
-    return Date.parse(d) / 1000;
+function convertDateStringToUnixTimestamp(datestring: string | number): number {
+    if (typeof datestring === 'string') {
+        const d: string = <string>datestring;
+        return Math.round(Date.parse(d) / 1000);
+    }
+    return datestring; // a number
 }
 
 class NyrkioResultSorter {
@@ -86,7 +103,6 @@ class NyrkioResultSorter {
         this.r = new Map<string, Map<string, Map<string, NyrkioJson>>>();
     }
 
-    // TODO: git_commit appears to be redundant
     add(path: string, git_commit: string, result: NyrkioJson) {
         if (result.metrics.length <= 0) return;
 
@@ -126,22 +142,35 @@ class NyrkioResultSorter {
 
 function convertBenchmarkToNyrkioJson(bench: Benchmark, config: Config): NyrkioJsonPath[] | null {
     let { name } = config;
+    const { tool } = config;
 
     const benches = bench.benches;
-    const d = bench.date / 1000; // Only Unix timestamps in Nyrkiö context.
+    const d = Math.round(bench.date / 1000); // Only Unix timestamps in Nyrkiö context.
     let nyrkioResult = nyrkioJsonInit(bench.commit, d);
+    if (bench.baseCommit) {
+        if (nyrkioResult.extra_info === undefined) {
+            nyrkioResult.extra_info = {};
+        }
+        nyrkioResult.extra_info.base_commit = bench.baseCommit;
+        if (bench.baseCommit.timestamp !== undefined) {
+            nyrkioResult.extra_info.base_commit.timestamp = convertDateStringToUnixTimestamp(
+                bench.baseCommit.timestamp,
+            );
+        }
+    }
+
     let testName: string | undefined = '';
     let branch: string | undefined = undefined;
-    name = sanitizeForUri(name);
+    name = sanitizeForUri(name, tool);
     let nyrkioPath = name;
     const nsrt = new NyrkioResultSorter();
     for (const b of benches) {
-        if (testName !== sanitizeForUri(b.testName)) {
+        if (testName !== sanitizeForUri(b.testName, tool)) {
             nsrt.add(nyrkioPath, bench.commit.id, nyrkioResult);
             nyrkioResult = nyrkioJsonInit(bench.commit, d);
 
-            testName = sanitizeForUri(b.testName);
-            branch = sanitizeForUri(nyrkioResult.attributes.branch);
+            testName = sanitizeForUri(b.testName, tool);
+            branch = sanitizeForUri(nyrkioResult.attributes.branch, tool);
             core.debug(branch);
             if (testName && testName.length > 0) {
                 nyrkioPath = name + '/' + branch + '/' + testName;
@@ -153,6 +182,9 @@ function convertBenchmarkToNyrkioJson(bench: Benchmark, config: Config): NyrkioJ
         m.value = b.value;
         m.name = b.name;
         m.unit = b.unit;
+        if (b.direction !== undefined) {
+            m.direction = b.direction;
+        }
         nyrkioResult.metrics.push(m);
     }
     nsrt.add(nyrkioPath, bench.commit.id, nyrkioResult);
@@ -160,8 +192,8 @@ function convertBenchmarkToNyrkioJson(bench: Benchmark, config: Config): NyrkioJ
     return nsrt.iterator();
 }
 
-async function setParameters(config: Config) {
-    const { nyrkioOrg, nyrkioPvalue, nyrkioThreshold, neverFail, nyrkioToken, nyrkioApiRoot } = config;
+async function setParameters(config: Config, options: object) {
+    const { nyrkioOrg, nyrkioPvalue, nyrkioThreshold, neverFail, nyrkioApiRoot } = config;
     if (nyrkioPvalue === null && nyrkioThreshold === null) return;
     if (nyrkioPvalue === null || nyrkioThreshold === null) {
         core.error('Please set both nyrkio-settings-pvalue and nyrkio-settings-threshold');
@@ -173,11 +205,7 @@ async function setParameters(config: Config) {
     }
     console.log(`Set Nyrkiö parameters: nyrkio-pvalue=${nyrkioPvalue} nyrkio-threshold=${nyrkioThreshold}`);
     console.log(`Note: These are global parameters that will be used for all your Nyrkiö test results.`);
-    const options = {
-        headers: {
-            Authorization: 'Bearer ' + (nyrkioToken ? nyrkioToken : ''),
-        },
-    };
+
     const configObject = {
         core: { min_magnitude: nyrkioThreshold, max_pvalue: nyrkioPvalue },
     };
@@ -212,8 +240,8 @@ async function setParameters(config: Config) {
         }
     }
 }
-async function setNotifiers(config: Config) {
-    const { nyrkioOrg, commentAlways, commentOnAlert, neverFail, nyrkioToken, nyrkioApiRoot } = config;
+async function setNotifiers(config: Config, options: object) {
+    const { nyrkioOrg, commentAlways, commentOnAlert, neverFail, nyrkioApiRoot } = config;
     console.log(
         `Set Nyrkiö preference for comment on PR: comment-always=${commentAlways} comment-on-alert=${commentOnAlert} => ${
             commentAlways || commentOnAlert
@@ -223,11 +251,7 @@ async function setNotifiers(config: Config) {
         console.warn('comment-on-alert is not yet supported for Nyrkiö. Will fall back to comment-always.');
     }
     console.log(`Note: These are global parameters that will be used for all your Nyrkiö test results.`);
-    const options = {
-        headers: {
-            Authorization: 'Bearer ' + (nyrkioToken ? nyrkioToken : ''),
-        },
-    };
+
     // const configObject = {
     //     notifiers: { github: commentAlways },
     // };
@@ -239,15 +263,15 @@ async function setNotifiers(config: Config) {
     try {
         // Will throw on failure
         const response = await axios.get(uri, options);
-        let configObject = response.data;
-        if (
-            !configObject ||
-            (configObject && configObject.notifiers === null) ||
-            (configObject && configObject.notifiers === undefined)
-        ) {
-            configObject = {
-                notifiers: { github: true, slack: false, since_days: 14 },
-            };
+        const currentConfig = response.data;
+        const configObject = {
+            notifiers: { github: true, slack: false, since_days: 14 },
+        };
+        if (currentConfig?.notifiers?.slack) {
+            configObject.notifiers.slack = currentConfig.notifiers.slack;
+        }
+        if (currentConfig?.notifiers?.since_days) {
+            configObject.notifiers.since_days = currentConfig.notifiers.since_days;
         }
         configObject['notifiers']['github'] = commentAlways || commentOnAlert;
         console.log(configObject);
@@ -274,40 +298,174 @@ async function setNotifiers(config: Config) {
     }
 }
 
+const unitConversionTable: Map<string, Map<string, number>> = new Map();
+const s: Map<string, number> = new Map();
+s.set('ms', 0.001);
+s.set('us', 0.000001);
+s.set('µs', 0.000001);
+s.set('ns', 0.000000001);
+unitConversionTable.set('s', s);
+const ms: Map<string, number> = new Map();
+ms.set('s', 1000);
+ms.set('us', 0.001);
+ms.set('µs', 0.001);
+ms.set('ns', 0.000001);
+unitConversionTable.set('ms', ms);
+const us: Map<string, number> = new Map();
+us.set('s', 1000000);
+us.set('ms', 1000);
+us.set('us', 1);
+us.set('µs', 1);
+us.set('ns', 0.001);
+unitConversionTable.set('us', us);
+unitConversionTable.set('µs', us);
+const ns: Map<string, number> = new Map();
+ns.set('s', 1000000000);
+ns.set('ms', 1000000);
+ns.set('us', 1000);
+ns.set('µs', 1000);
+unitConversionTable.set('ns', ns);
+
+function unitConversion(myUnit: string, targetUnit: string, value: number): number {
+    if (myUnit !== targetUnit) {
+        if (unitConversionTable.has(myUnit) && unitConversionTable.get(myUnit)!.has(targetUnit)) {
+            const newValue = value / unitConversionTable.get(myUnit)!.get(targetUnit)!;
+            if (newValue !== undefined) {
+                console.log(`Converted ${myUnit} to ${targetUnit}`);
+                return newValue;
+            }
+        }
+        console.warn(
+            `Previous values at nyrkio.com are in ${targetUnit}, and I have a new value ${value} in ${myUnit}, but I don't know how to convert from one to another. This may cause unnecessary alerts if results aren't reported in constant units.`,
+        );
+    }
+    return value;
+}
+
+async function validateUnit(uri: string, results: NyrkioJson[], options: object) {
+    console.log(
+        `GET ${uri} first. We want to confirm that previous results use the same unit as we are sending (s, ms, us, µs, ns).`,
+    );
+    try {
+        const response = await axios.get(uri, options);
+        // console.log(response.data);
+        if (response.data) {
+            const newestResult: NyrkioJson = response.data.pop();
+            if (newestResult.metrics) {
+                const lookupMetric: Map<string, NyrkioMetrics> = new Map();
+                let m: NyrkioMetrics;
+                for (m of newestResult.metrics) {
+                    lookupMetric.set(m.name, m);
+                }
+                for (const myResult of results) {
+                    if (myResult.metrics === undefined) {
+                        continue;
+                    }
+                    for (const myMetric of myResult.metrics) {
+                        const oldMetric = lookupMetric.get(myMetric.name);
+                        if (oldMetric === undefined) {
+                            continue;
+                        }
+                        console.log(oldMetric, myMetric);
+                        myMetric.value = unitConversion(myMetric.unit, oldMetric.unit, myMetric.value);
+                    }
+                }
+            }
+        }
+    } catch (error: any) {
+        if (error !== undefined && axios.isAxiosError(error)) {
+            // Access to config, request, and response
+            const aerror: AxiosError = <AxiosError>error;
+            console.warn(
+                `Failed to check past results at nyrkio.com, uri = ${uri}, response = ${aerror.response!.status}`,
+            );
+            console.warn(error.response!.data);
+        } else {
+            console.warn(`Failed to check past results at nyrkio.com, uri = ${uri}, response = ${error.status}`);
+            console.warn(error);
+        }
+    }
+}
+
 export async function postResults(
     allTestResults: NyrkioJsonPath[],
     config: Config,
     commit: Commit,
-): Promise<[NyrkioAllChanges] | boolean> {
-    await setParameters(config);
-    await setNotifiers(config);
-    const { name, nyrkioToken, nyrkioApiRoot, nyrkioOrg, neverFail, nyrkioPublic } = config;
+): Promise<[NyrkioAllChanges] | boolean | undefined> {
+    const { name, nyrkioApiRoot, nyrkioOrg, neverFail, nyrkioPublic } = config;
+    let nyrkioToken: string | null = config.nyrkioToken;
+    let isCphUser: boolean | null = null;
+
     core.debug(nyrkioToken ? nyrkioToken.substring(0, 5) : "WHERE's MY TOKEN???");
-    const options = {
-        headers: {
-            Authorization: `Bearer ${nyrkioToken}`,
-        },
-    };
+
+    let options = {};
+    if (!nyrkioToken) {
+        const jwt = await challengePublishHandshake(config);
+        if (jwt) {
+            console.log(
+                'No JWT token supplied, but successfully used Challenge Publish Handshake to prove my identity.',
+            );
+            isCphUser = true;
+            nyrkioToken = jwt;
+            config.nyrkioToken = jwt;
+            options = {
+                headers: {
+                    Authorization: `Bearer ${nyrkioToken}`,
+                },
+            };
+        } else {
+            if (!neverFail) {
+                core.setFailed('nyrkio-token was not configured and trying to use Challenge Publish Handshake failed.');
+                return undefined; // undefined is an error, false means no changepoints
+            } else {
+                console.error('nyrkio-token was not configured and trying to use Challenge Publish Handshake failed.');
+                console.error('Note: never-fail is true. Will exit successfully to keep the build green.');
+                return undefined; // undefined is an error, false means no changepoints
+            }
+        }
+    } else {
+        options = {
+            headers: {
+                Authorization: `Bearer ${nyrkioToken}`,
+            },
+        };
+    }
+
+    if (nyrkioToken && !isCphUser) {
+        await setParameters(config, options);
+        await setNotifiers(config, options);
+    }
+
     let allChanges: [NyrkioAllChanges] | boolean = false;
-    const gitRepoBase = 'https://github.com/';
-    let gitRepo = gitRepoBase + commit.repo;
-    gitRepo = encodeURIComponent(gitRepo);
+    let changes2: [NyrkioAllChanges] | boolean = false;
+    // const gitRepoBase = 'https://github.com/';
+    // Tired of trying to remember what each encodeURI function exactly does.
+    // From now on I'll just do it myself...
+    const gitRepoBase = 'https%3A%2F%2Fgithub.com%2F';
+    const gitRepo = gitRepoBase + commit.repo.split('/').join('%2F') + '/';
+    // gitRepo = encodeURIComponent(gitRepo);
 
     for (const r of allTestResults) {
         core.debug(r.path);
+        let pullUri = '';
         let uri = `${nyrkioApiRoot}result/${r.path}`;
+        let headUri: string = uri;
         let testConfigUrl = `${nyrkioApiRoot}config/${r.path}`;
         if (commit.prNumber) {
             uri = `${nyrkioApiRoot}pulls/${commit.repo}/${commit.prNumber}/result/${r.path}`;
+            pullUri = uri;
         }
         if (nyrkioOrg !== undefined) {
             uri = `${nyrkioApiRoot}orgs/result/${nyrkioOrg}/${r.path}`;
+            headUri = uri;
             testConfigUrl = `${nyrkioApiRoot}orgs/config/${nyrkioOrg}/${r.path}`;
             if (commit.prNumber) {
                 uri = `${nyrkioApiRoot}orgs/pulls/${commit.repo}/${commit.prNumber}/result/${nyrkioOrg}/${r.path}`;
+                pullUri = uri;
             }
         }
         try {
+            await validateUnit(headUri, r.results, options);
             console.log('PUT results: ' + uri);
             // Will throw on failure
             const response = await axios.put(uri, r.results, options);
@@ -330,12 +488,14 @@ export async function postResults(
                     }
                 }
             }
+            notUsed(pullUri);
         } catch (err: any) {
             console.error(`PUT to ${uri} failed. I'll keep trying with the others though.`);
             if (err & err.toJSON) {
                 console.error(err.toJSON());
             } else {
                 console.error(err);
+                console.error(err.response.data);
             }
             if (!neverFail) {
                 core.setFailed(`PUT to ${uri} failed. ${err.status} ${err.code}.`);
@@ -347,9 +507,9 @@ export async function postResults(
         }
         console.log(nyrkioPublic);
         try {
-            if (nyrkioPublic) {
+            if (nyrkioPublic && nyrkioToken && !isCphUser) {
                 core.debug(`Make ${r.path} public.`);
-                const docs = [{ public: true, attributes: { git_repo: commit.repo, branch: commit.branch } }];
+                const docs = [{ public: true, attributes: { git_repo: commit.repoUrl, branch: commit.branch } }];
                 const response = await axios.post(testConfigUrl, docs, options);
                 if (response.data) {
                     core.debug(JSON.stringify(response.data));
@@ -375,6 +535,10 @@ export async function postResults(
             }
         }
     }
+
+    if (commit.prNumber) {
+        changes2 = await getChangesAndNotify(config, commit, options, isCphUser);
+    }
     const html_url_base = nyrkioApiRoot.split('/api/')[0];
     let html_url = `${html_url_base}/tests/${name}`;
     if (nyrkioPublic) {
@@ -383,9 +547,80 @@ export async function postResults(
     console.log('------');
     console.log('Your test results can now be analyzed at:');
     console.log(html_url);
+    console.debug(allChanges);
+    return changes2;
+}
+async function getChangesAndNotify(
+    config: Config,
+    commit: Commit,
+    httpOptions: object,
+    isCphUser: boolean | null = null,
+): Promise<[NyrkioAllChanges] | boolean> {
+    const repo = commit.repo;
+    const pull_number = commit.prNumber;
+    const pub: string = isCphUser ? '/public' : '';
+    const middle = pub + `/pulls/${repo}/${pull_number}/changes/${commit.id}`;
+    const { nyrkioApiRoot, commentAlways, commentOnAlert, neverFail } = config;
+    const notify: boolean = commentAlways || commentOnAlert;
+    const q = notify ? '?notify=1' : '';
+    const uri = nyrkioApiRoot + middle + q;
+    let allChanges: [NyrkioAllChanges] | boolean = false;
+
+    try {
+        console.log('Get all changes and notify if configured: ' + uri);
+        const response = await axios.get(uri, httpOptions);
+
+        if (response.data) {
+            console.debug(typeof response.data);
+            const list_of_all_changes_per_test: Array<object> = response.data;
+
+            list_of_all_changes_per_test.forEach((test_name_and_changes_obj) => {
+                console.debug(test_name_and_changes_obj);
+                console.debug(typeof test_name_and_changes_obj);
+                for (const [test_name, changes] of Object.entries(test_name_and_changes_obj)) {
+                    const cpList: NyrkioChanges[] = changes;
+                    console.debug(test_name);
+                    console.debug(cpList);
+
+                    if (cpList === undefined || cpList.length === 0) {
+                        core.debug('No changes for ' + test_name);
+                    } else {
+                        // Note: In extreme cases Nyrkiö might alert immediately after you committed a regression.
+                        // However, in most cases you'll get a separate alert a few days later, once the statistical
+                        // significance accumulates.
+                        // console.log(c);
+                        for (const changePoint of cpList.values()) {
+                            console.debug(changePoint);
+                            if (changePoint.attributes && changePoint.attributes.git_commit === commit.id) {
+                                const cc: NyrkioAllChanges = { path: test_name, changes: [changePoint] };
+                                if (allChanges === false) allChanges = [cc];
+                                else {
+                                    const acTypeList: [NyrkioAllChanges] = <[NyrkioAllChanges]>allChanges;
+                                    acTypeList.push(cc);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    } catch (err: any) {
+        console.error(`GET to ${uri} failed.`);
+        if (err & err.toJSON) {
+            console.error(err.toJSON());
+        } else {
+            console.error(err);
+        }
+        if (!neverFail) {
+            core.setFailed(`GET to ${uri} failed. ${err.status} ${err.code} ${err}.`);
+        } else {
+            console.error(
+                'Note: never-fail is true. Ignoring this error and continuing. Will exit successfully to keep the build green.',
+            );
+        }
+    }
     return allChanges;
 }
-
 export async function nyrkioFindChanges(b: Benchmark, config: Config) {
     const { nyrkioEnable, failOnAlert, neverFail } = config;
     core.debug('nyrkio-enable=' + nyrkioEnable.toString());
@@ -396,6 +631,11 @@ export async function nyrkioFindChanges(b: Benchmark, config: Config) {
     if (allTestResults === null) return;
 
     const changes = await postResults(allTestResults, config, b.commit);
+    // Overloaded this, sorry. Don't want to check neverFail again when I just did...
+    if (changes === undefined) {
+        return;
+    }
+
     if (changes && failOnAlert) {
         console.error(
             '\n\nNyrkiö detected a change in your performance test results. Please see the log for details.\n',

@@ -1,7 +1,8 @@
-import * as core from '@actions/core';
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+// import * as github from '@actions/github';
+import * as core from '@actions/core';
 
 export type ToolType = typeof VALID_TOOLS[number];
 export interface Config {
@@ -39,6 +40,7 @@ export const VALID_TOOLS = [
     'cargo',
     'criterion',
     'go',
+    'gotpc',
     'benchmarkjs',
     'benchmarkluau',
     'pytest',
@@ -54,11 +56,10 @@ export const VALID_TOOLS = [
 ] as const;
 const RE_UINT = /^\d+$/;
 const RE_DOUBLE = /^\d+\.\d+$/;
+const RE_DOUBLE_SCIENTIFIC = /^\d+\.?\d*E[+-]?\d+$/;
 
 function throwValidationError(neverFail: boolean, msg: string): boolean {
     if (neverFail) {
-        console.error(msg);
-        console.error('never-fail is set. Will exit cleanly so as not to fail your build.');
         return true;
     }
     throw new Error(msg);
@@ -144,6 +145,17 @@ function validateName(name: string, neverFail: boolean) {
     }
     throwValidationError(neverFail, 'Name must not be empty');
     return;
+}
+
+function validateGitHubTokenAlways(githubToken: string | undefined, neverFail: boolean) {
+    if (!githubToken) {
+        console.warn(
+            'github-token is empty. It is needed to fetch more meta-data about the commit(s). Without github-token, you will send incomplete data to Nyrkiö.',
+        );
+    }
+    if (!neverFail) {
+        console.log('In v3 github-token will be required.');
+    }
 }
 
 function validateGitHubToken(inputName: string, githubToken: string | undefined, todo: string, neverFail: boolean) {
@@ -275,7 +287,7 @@ function getDoubleInput(name: string, neverFail: boolean): number | null {
         console.log(`${name} is empty string`);
         return null;
     }
-    if (!RE_DOUBLE.test(input)) {
+    if (!RE_DOUBLE.test(input) && !RE_DOUBLE_SCIENTIFIC.test(input)) {
         throwValidationError(neverFail, `'${name}' input must be double but got '${input}'`);
         return null;
     }
@@ -320,9 +332,8 @@ function validateNyrkio(
 ): asserts nyrkioToken {
     if (nyrkioEnable) {
         if (!nyrkioToken) {
-            throwValidationError(
-                neverFail,
-                'Please use GitHub secrets to supply a JWT token for ${nyrkioApiRoot}. (https://nyrkio.com/docs/getting-started)',
+            console.log(
+                "nyrkio-token is not supplied in the input. Don't worry, will use Challenge Publish Handshake with Nyrkiö to automatically post test_results with your github username.",
             );
             return;
         }
@@ -372,6 +383,7 @@ export async function configFromJobInput(): Promise<Config> {
     validateGhPagesBranch(ghPagesBranch, neverFail);
     benchmarkDataDirPath = validateBenchmarkDataDirPath(benchmarkDataDirPath, neverFail);
     validateName(name, neverFail);
+    validateGitHubTokenAlways(githubToken, neverFail);
     if (autoPush) {
         validateGitHubToken('auto-push', githubToken, 'to push GitHub pages branch to remote', neverFail);
     }

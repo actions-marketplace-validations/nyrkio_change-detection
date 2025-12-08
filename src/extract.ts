@@ -6,11 +6,15 @@ import gitCommitInfo from 'git-commit-info';
 import { branchName } from './git';
 import { Config, ToolType } from './config';
 
+const DIRECTION_IS_BETTER = ['higher_is_better', 'lower_is_better'];
+export type Direction = typeof DIRECTION_IS_BETTER[number];
+
 export interface BenchmarkResult {
     name: string; // metric name
     value: number;
     range?: string;
     unit: string;
+    direction?: Direction;
     extra?: string;
     testName?: string;
 }
@@ -27,7 +31,7 @@ export interface Commit {
     distinct?: unknown; // Unused
     id: string;
     message: string;
-    timestamp?: string;
+    timestamp?: string | number; // number is on nyrkio side where this gets converted to a timestamp.
     tree_id?: unknown; // Unused
     url: string;
     repo: string;
@@ -56,6 +60,12 @@ export interface NyrkioMetrics {
     direction?: string;
 }
 
+export interface ExtraInfo {
+    head_commit?: Commit;
+    base_commit?: Commit;
+    build_time?: number;
+}
+
 export interface NyrkioJson {
     timestamp: number;
     metrics: NyrkioMetrics[];
@@ -64,7 +74,7 @@ export interface NyrkioJson {
         git_repo: string;
         branch: string;
     };
-    extra_info?: object;
+    extra_info?: ExtraInfo;
 }
 
 export interface NyrkioJsonPath {
@@ -77,6 +87,7 @@ export interface Benchmark {
     date: number;
     tool: ToolType;
     benches: BenchmarkResult[];
+    baseCommit?: Commit; // For pull requests
 }
 
 export interface GoogleCppBenchmarkJson {
@@ -259,6 +270,22 @@ export interface BenchmarkDotNetBenchmarkJson {
     Benchmarks: BenchmarkDotnetBenchmark[];
 }
 
+export interface GoTpcBenchmarkJson {
+    Operation: string;
+    Count?: string;
+    '50th(ms)'?: string;
+    '90th(ms)'?: string;
+    '95th(ms)'?: string;
+    '99th(ms)'?: string;
+    '99.9th(ms)'?: string;
+    'Max(ms)'?: string;
+    'Avg(ms)'?: string;
+    'Sum(ms)'?: string;
+    TPM?: string;
+    'Takes(s)'?: string;
+    Prefix?: string;
+}
+
 function getHumanReadableUnitValue(seconds: number): [number, string] {
     if (seconds < 1.0e-6) {
         return [seconds * 1e9, 'nsec'];
@@ -280,18 +307,18 @@ function getCommitFromPullRequestPayload(pr: PullRequest): Commit {
         name: username, // XXX: Fallback, not correct
         username,
     };
-    const commitUrl = pr.html_url ?? pr.base.repo.full_name ?? pr._links.html;
+    const commitUrl = pr.html_url ?? pr._links.html;
     return {
         author: user,
         committer: user,
         id,
         message: pr.title,
-        timestamp: pr.head.repo.updated_at,
+        timestamp: pr.head.repo.pushed_at, // This is wrong, will replace in caller
         repo: pr.base.repo.full_name,
-        url: pr.head.url,
+        url: commitUrl,
         branch: pr.base.ref_name || pr.base.ref,
         prNumber: pr.number,
-        repoUrl: commitUrl,
+        repoUrl: `https://github.com/${pr.base.repo.full_name}`,
     };
 }
 
@@ -309,6 +336,7 @@ async function getCommitFromGitHubAPIRequest(githubToken: string, ref?: string):
     }
 
     const { commit } = data;
+    const repoUrl = data.html_url.split('/commit/')[0];
 
     return {
         author: {
@@ -326,12 +354,18 @@ async function getCommitFromGitHubAPIRequest(githubToken: string, ref?: string):
         timestamp: commit.author?.date,
         url: commit.url,
         repo: github.context.repo.repo,
-        repoUrl: data.html_url,
+        repoUrl: repoUrl,
     };
 }
 
 // Visible for testing / mocking
-export async function getCommitFromLocalRepo(commit: any): Promise<Commit> {
+export async function getCommitFromLocalRepo(commit: any, repoFullName: string, repoUrl = ''): Promise<Commit> {
+    const cwd: string = process.cwd();
+    if (repoUrl === '') {
+        repoUrl = 'file://' + cwd;
+    }
+    const url = `{repoUrl}/commits/${commit.commit}`;
+
     return {
         author: {
             name: commit.author?.name,
@@ -346,13 +380,14 @@ export async function getCommitFromLocalRepo(commit: any): Promise<Commit> {
         id: commit.commit,
         message: commit.message,
         timestamp: commit.date,
-        url: `file:///${process.cwd()}/commits/${commit.commit}`,
-        repo: 'local_checkout',
-        repoUrl: 'file:///' + process.cwd(),
+        url: url,
+        repo: repoFullName,
+        repoUrl: repoUrl,
     };
 }
 
 async function getCommit(githubToken?: string, ref?: string): Promise<Commit> {
+    core.debug(JSON.stringify(github.context, null, 4));
     if (github.context.payload.head_commit) {
         core.debug('Return head_commit');
         core.debug(JSON.stringify(github.context.payload, null, 4));
@@ -374,25 +409,55 @@ async function getCommit(githubToken?: string, ref?: string): Promise<Commit> {
     }
 
     if (!githubToken) {
-        throw new Error(
-            `No commit information is found in payload: ${JSON.stringify(
-                github.context.payload,
-                null,
-                2,
-            )}. Also, no 'github-token' provided, could not fallback to GitHub API Request.`,
+        console.log(
+            "No commit information is found in payload. Also, no 'github-token' provided, could not fallback to GitHub API Request.",
         );
+        console.log('Will proceed to use the git_sha from the local checkout...');
+        core.debug(JSON.stringify(github.context.payload, null, 2));
     } else {
         return getCommitFromGitHubAPIRequest(githubToken, ref);
     }
-
+    const { repoFullName, repoUrl } = getRepoNameAndUrl();
     const localRepo = gitCommitInfo();
+    // console.log(localRepo);
     if (localRepo) {
-        return getCommitFromLocalRepo(localRepo);
+        return getCommitFromLocalRepo(localRepo, repoFullName, repoUrl);
     }
+    throw new Error("I tried everything, but couldn't find out the git_sha to start from...");
+}
+
+function getRepoNameAndUrl() {
+    let repoFullName = '';
+    let repoUrl = '';
+    if (github.context.payload.repository) {
+        core.debug("For scheduled runs, and just as a general fallback, there's always the `repository` object.");
+        if (github.context.payload.repository.html_url) {
+            repoUrl = github.context.payload.repository.html_url;
+        }
+        if (github.context.payload.repository.full_name) repoFullName = github.context.payload.repository.full_name;
+        else if (github.context.payload.repository.name) {
+            const r = github.context.payload.repository.name;
+            if (github.context.payload.repository.owner?.login) {
+                const o = github.context.payload.repository.owner?.login;
+                repoFullName = `${o}/${r}`;
+                core.debug(o);
+            } else if (github.context.payload.repository.html_url) {
+                const u = github.context.payload.repository.html_url.split('/');
+                const rr = u.pop();
+                const o = u.pop();
+                repoFullName = `${o}/${rr}`;
+                if (r !== rr || o === '') {
+                    core.debug(
+                        `Should never happen but makes stupid typescript compiler happy. Anyway, it did happen so: ${r} ${rr} ${o}`,
+                    );
+                }
+            }
+        }
+    }
+    return { repoFullName, repoUrl };
 }
 
 async function addCommitBranch(commit: Commit): Promise<undefined> {
-    console.log(commit);
     if (commit.prNumber) {
         // For pull requests, we actually want the base (aka target) branch
         const maybeBranch = github.context.payload.pull_request?.base.ref;
@@ -479,13 +544,17 @@ function extractCriterionResult(output: string): BenchmarkResult[] {
         const min = m[2].replace(reComma, '');
         const max = m[6].replace(reComma, '');
         // console.log(name,value,unit);
+        let direction: string | undefined = undefined;
+        if (name === 'time') direction = 'lower_is_better';
+        if (name === 'thrpt') direction = 'higher_is_better';
 
         ret.push({
             name,
             value,
             range: `[${min}, ${max}]`,
             unit: unit,
-            testName,
+            direction: direction,
+            testName: testName,
         });
     }
 
@@ -502,9 +571,9 @@ function extractGoResult(output: string): BenchmarkResult[] {
     // Example if someone has used the ReportMetric function to add additional metrics to each benchmark:
     // BenchmarkThing-16    	       1	95258906556 ns/op	        64.02 UnitsForMeasure2	        31.13 UnitsForMeasure3
 
-    // reference, "Proposal: Go Benchmark Data Format": https://go.googlesource.com/proposal/+/master/design/14313-benchmark-format.md
-    // "A benchmark result line has the general form: <name> <iterations> <value> <unit> [<value> <unit>...]"
-    // "The fields are separated by runs of space characters (as defined by unicode.IsSpace), so the line can be parsed with strings.Fields. The line must have an even number of fields, and at least four."
+    // reference, `Proposal: Go Benchmark Data Format`: https://go.googlesource.com/proposal/+/master/design/14313-benchmark-format.md
+    // `A benchmark result line has the general form: <name> <iterations> <value> <unit> [<value> <unit>...]`
+    // `The fields are separated by runs of space characters (as defined by unicode.IsSpace), so the line can be parsed with strings.Fields. The line must have an even number of fields, and at least four.`
     const reExtract =
         /^(?<name>Benchmark\w+[\w()$%^&*-=|,[\]{}"#]*?)(?<procs>-\d+)?\s+(?<times>\d+)\s+(?<remainder>.+)$/;
 
@@ -762,7 +831,7 @@ function extractJuliaBenchmarkResult(output: string): BenchmarkResult[] {
         json = JSON.parse(output);
     } catch (err: any) {
         throw new Error(
-            `Output file for 'julia' must be JSON file generated by BenchmarkTools.save("output.json", suit::BenchmarkGroup) :  ${err.message}`,
+            `Output file for 'julia' must be JSON file generated by BenchmarkTools.save("output.json", suit::BenchmarkGroup) : ${err.message}`,
         );
     }
 
@@ -783,11 +852,12 @@ function extractJmhResult(output: string): BenchmarkResult[] {
     }
     return json.map((b) => {
         const name = b.benchmark;
+        const metricName = b.mode; // metric name
         const value = b.primaryMetric.score;
         const unit = b.primaryMetric.scoreUnit;
         const params = b.params ? ' ( ' + JSON.stringify(b.params) + ' )' : '';
-        const extra = `iterations: ${b.measurementIterations}\nforks: ${b.forks}\nthreads: ${b.threads}`;
-        return { name: name + params, value, unit, extra };
+        const extra = `iterations: ${b.measurementIterations}\nforks: ${b.forks}\nthreads: ${b.threads}\nparams: ${params}`;
+        return { testName: name, name: metricName, direction: 'lower_is_better', value, unit, extra };
     });
 }
 
@@ -821,6 +891,50 @@ function extractCustomBenchmarkResult(output: string): BenchmarkResult[] {
             `Output file for 'custom-(bigger|smaller)-is-better' must be JSON file containing an array of entries in BenchmarkResult format: ${err.message}`,
         );
     }
+}
+
+function extractGoTpcBenchmarkResult(output: string): BenchmarkResult[] {
+    const start = output.indexOf('Finished');
+    if (start === -1) {
+        throw new Error(`Results for Go TPC benchmark not found. (Searching for 'Finished' followed by JSON)`);
+    }
+    const startjar = start + 9;
+    const results: string[] = output.substring(startjar).split('\n');
+    const ret: BenchmarkResult[] = [];
+    results.forEach((result) => {
+        if (result === '') return;
+        try {
+            const json: GoTpcBenchmarkJson[] = JSON.parse(result);
+            for (const op of json) {
+                for (const [metric, v] of Object.entries(op)) {
+                    if (metric === `Operation`) continue;
+                    if (metric === `Prefix`) continue;
+
+                    const parts = metric.split(`(`);
+                    let u = `tpm`;
+                    if (parts.length > 1) {
+                        u = parts[1].substring(0, parts[1].length - 1);
+                    }
+                    let operation = ``;
+                    if (op[`Operation`]) {
+                        operation = op[`Operation`] + '-';
+                    }
+                    const value = parseFloat(v);
+                    if (value === null) continue;
+
+                    const br: BenchmarkResult = {
+                        name: operation + `${metric}`,
+                        value: value,
+                        unit: u,
+                    };
+                    ret.push(br);
+                }
+            }
+        } catch (err: any) {
+            throw new Error(`Error parsing JSON in Go TPC output: ${err.message}`);
+        }
+    });
+    return ret;
 }
 
 function extractLuauBenchmarkResult(output: string): BenchmarkResult[] {
@@ -875,6 +989,7 @@ function extractTimeBenchmarkResult(output: string): BenchmarkResult[] {
                     name: 'real',
                     value: v,
                     unit: 's',
+                    direction: 'lower_is_better',
                 });
         }
         if (line.startsWith('user')) {
@@ -887,6 +1002,7 @@ function extractTimeBenchmarkResult(output: string): BenchmarkResult[] {
                     name: 'user',
                     value: v,
                     unit: 's',
+                    direction: 'lower_is_better',
                 });
         }
         if (line.startsWith('sys')) {
@@ -898,6 +1014,7 @@ function extractTimeBenchmarkResult(output: string): BenchmarkResult[] {
                     name: 'sys',
                     value: v,
                     unit: 's',
+                    direction: 'lower_is_better',
                 });
             firstline = true;
         }
@@ -947,7 +1064,7 @@ export async function extractNyrkioJsonResult(config: Config): Promise<[NyrkioJs
         json = JSON.parse(output);
     } catch (err: any) {
         throw new Error(
-            `Output file for 'NyrkioJson' must be inte format defined at http://nyrkio.com/openapi :  ${err.message}`,
+            `Output file for 'NyrkioJson' must be in the format defined at http://nyrkio.com/openapi :  ${err.message}`,
         );
     }
 
@@ -996,7 +1113,6 @@ export async function extractResult(config: Config): Promise<Benchmark> {
             break;
         case 'time':
             benches = extractTimeBenchmarkResult(output);
-            console.log(JSON.stringify(benches));
             break;
         case 'customBiggerIsBetter':
             benches = extractCustomBenchmarkResult(output);
@@ -1006,6 +1122,9 @@ export async function extractResult(config: Config): Promise<Benchmark> {
             break;
         case 'benchmarkluau':
             benches = extractLuauBenchmarkResult(output);
+            break;
+        case 'gotpc':
+            benches = extractGoTpcBenchmarkResult(output);
             break;
         default:
             throw new Error(`FATAL: Unexpected tool: '${tool}'`);
@@ -1017,6 +1136,56 @@ export async function extractResult(config: Config): Promise<Benchmark> {
     console.log('get commit');
     const commit = await getCommit(githubToken, ref);
     await addCommitBranch(commit);
+
+    if (commit.prNumber) {
+        const pr = github.context.payload.pull_request;
+        let headCommit: Commit | undefined = undefined;
+        let baseCommit: Commit | undefined = undefined;
+        // needed for typescript compiler...
+        if (pr) {
+            if (githubToken) {
+                headCommit = await getCommitFromGitHubAPIRequest(githubToken, pr.head.sha);
+                baseCommit = await getCommitFromGitHubAPIRequest(githubToken, pr.base.sha);
+                headCommit.branch = pr.head.ref;
+                baseCommit.branch = pr.base.ref;
+            } else {
+                console.warn(
+                    "Can't use Github API to fetch necessary meta-data about the PR head and base commits. Fetching the same from the local checkout is not yet supported.",
+                );
+                /*
+                const { repoFullName, repoUrl } = getRepoNameAndUrl();
+                const localRepoHead = gitCommitInfo({ commit: pr.head.sha });
+                const localRepoBase = gitCommitInfo({ commit: pr.base.sha });
+                core.debug('localRepoHead and localRepoBase');
+                core.debug(JSON.stringify(localRepoHead));
+                core.debug(JSON.stringify(localRepoBase));
+                if (localRepoHead) {
+                    headCommit = await getCommitFromLocalRepo(localRepoHead, repoFullName, repoUrl);
+                    await addCommitBranch(headCommit);
+                }
+                if (localRepoBase) {
+                    baseCommit = await getCommitFromLocalRepo(localRepoBase, repoFullName, repoUrl);
+                    await addCommitBranch(baseCommit);
+                }
+                */
+            }
+            if (headCommit !== undefined) {
+                if (headCommit.timestamp) {
+                    console.log(`Set commit.timestamp to head commit timestamp {headCommit.timestamp}`);
+                    commit.timestamp = headCommit.timestamp;
+                }
+            }
+            if (baseCommit) {
+                return {
+                    commit,
+                    date: Date.now(),
+                    tool,
+                    benches,
+                    baseCommit,
+                };
+            }
+        }
+    }
     return {
         commit,
         date: Date.now(),

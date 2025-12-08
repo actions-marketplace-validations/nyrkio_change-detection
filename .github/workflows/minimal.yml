@@ -25,10 +25,11 @@ jobs:
           path: ./cache
           key: ${{ runner.os }}-benchmark
       - name: Store benchmark result
-        uses: nyrkio/change-detection@v1
+        uses: nyrkio/change-detection@v2
         with:
           tool: 'go'
           output-file-path: examples/go/output.txt
           external-data-json-path: ./cache/benchmark-data.json
           fail-on-alert: true
           nyrkio-enable: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
