@@ -542,7 +542,7 @@ export async function postResults(
     const html_url_base = nyrkioApiRoot.split('/api/')[0];
     let html_url = `${html_url_base}/tests/${name}`;
     if (nyrkioPublic) {
-        html_url = `${html_url_base}/public/${gitRepo}/${commit.branch}/${name}`;
+        html_url = `${html_url_base}/public/${gitRepo}${commit.branch}/${name}`;
     }
     console.log('------');
     console.log('Your test results can now be analyzed at:');
