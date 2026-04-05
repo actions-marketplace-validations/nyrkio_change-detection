@@ -149,14 +149,14 @@ describe('extractResult()', function () {
             tool: 'customBiggerIsBetter',
             file: 'customBiggerIsBetter_output.json',
         },
-         {
-             tool: 'customSmallerIsBetter',
-             file: 'customSmallerIsBetter_output.json',
-         },
-         {
-             tool: 'csv',
-             file: 'csv1.csv',
-         },
+        {
+            tool: 'customSmallerIsBetter',
+            file: 'customSmallerIsBetter_output.json',
+        },
+        {
+            tool: 'csv',
+            file: 'csv1.csv',
+        },
     ];
 
     it.each(normalCases)(`extracts benchmark output from $tool - $file`, async function (test) {
