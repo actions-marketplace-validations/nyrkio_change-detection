@@ -119,6 +119,7 @@ JSON format, and Nyrkiö's own JSON format in pass-thru mode:
 - Custom benchmarks where either 'biggerIsBetter' or 'smallerIsBetter'
 - [Nyrkios own JSON][nyrkio-json]
   format, which is simply passed directly to Nyrkiö API.
+- [Generic CSV][csv-workflow-example] with first column as the timestamp, string columns as attributes, and numeric columns treated as metrics
 
 Multiple languages in the same repository are supported for polyglot projects.
 
@@ -146,6 +147,7 @@ definitions are in [.github/workflows/](./.github/workflows) directory. Live wor
 | .Net         | [![C# Benchmark.Net Example Workflow][benchmarkdotnet-badge]][benchmarkdotnet-workflow-example] | [examples/benchmarkdotnet](./examples/benchmarkdotnet) |
 | Java         | [![Java Example Workflow][java-badge]][java-workflow-example] | [examples/java](./examples/java) |
 | Luau         | Coming soon | Coming soon |
+| CSV         | [Generic CSV Example][csv-workflow-example] | [examples/csv](./examples/csv) |
 
 ### Nyrkiö JSON format
 
@@ -420,6 +422,7 @@ Every release will appear on your GitHub notifications page.
 [minimal-workflow-example]: https://github.com/nyrkio/change-detection/actions?query=workflow%3A%22Example+for+minimal+setup%22
 [time-workflow-example]: https://github.com/nyrkio/change-detection/actions/workflows/time.yml
 [time-workflow-graphs]: https://nyrkio.com/public/https%3A%2F%2Fgithub.com%2Fnyrkio%2Fchange-detection/master/nyrkio/change-detection/master/time-cli-example
+[csv-workflow-example]: https://github.com/nyrkio/change-detection/actions/workflows/csv.yml
 
 [help-watch-release]: https://docs.github.com/en/github/receiving-notifications-about-activity-on-github/watching-and-unwatching-releases-for-a-repository
 [help-github-token]: https://docs.github.com/en/actions/security-guides/automatic-token-authentication

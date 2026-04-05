@@ -153,6 +153,10 @@ describe('extractResult()', function () {
             tool: 'customSmallerIsBetter',
             file: 'customSmallerIsBetter_output.json',
         },
+        {
+            tool: 'csv',
+            file: 'csv1.csv',
+        },
     ];
 
     it.each(normalCases)(`extracts benchmark output from $tool - $file`, async function (test) {
