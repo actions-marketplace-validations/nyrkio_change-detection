@@ -1024,6 +1024,118 @@ function extractTimeBenchmarkResult(output: string): BenchmarkResult[] {
     return results;
 }
 
+
+function extractCsvBenchmarkResult(output: string): BenchmarkResult[] {
+    const lines = output.split(/\n/);
+    const results: BenchmarkResult[] = [];
+    let firstline = true;
+    let colnames: string[] = [];
+    let firstNumericCol = -1;
+
+    for (const line of lines) {
+        core.debug(line);
+        const columns = line.split(",");
+        if (firstline) {
+            firstline = false;
+            const firstcol = columns[0].toLowerCase();
+            if (firstcol === "time" || firstcol == "timestamp" ) {
+                colnames = columns;
+                continue;
+            }
+
+//            const reIsNumeric = /^(0-9\+\-\.)+$/;
+            for ( let i = 1; i < columns.length; i++) {
+                if (Number(columns[i]).toString() == columns[i]){
+                    //if (columns[i].match(reIsNumeric)){
+                    firstNumericCol = i;
+                    break;
+                }
+            }
+
+            colnames = ["time"];
+            if (firstNumericCol>1){
+                colnames.push("testname");
+            }
+            if (firstNumericCol>2){
+                colnames.push("metricname");
+            }
+            if (firstNumericCol>3){
+                colnames.push("unit");
+            }
+            if (firstNumericCol>4){
+                colnames.push("direction");
+            }
+        }
+
+        if(firstNumericCol<0){
+            //const reIsNumeric = /^(0-9\+\-\.)+$/;
+            for ( let i = 1; i < columns.length; i++) {
+                console.log(columns[i]);
+                if (Number(columns[i]).toString() == columns[i]){
+                //if (columns[i].match(reIsNumeric)){
+                    firstNumericCol = i;
+                    break;
+                }
+            }
+        }
+        console.debug(colnames);
+        console.debug(columns);
+        let testName = "default_testname";
+        let metricName = "default_metricname";
+        let unit = "s";
+        let direction = 'lower_is_better';
+        if (firstNumericCol>1){
+            testName = colnames[1];
+        }
+        if (firstNumericCol>2){
+            metricName = colnames[2];
+        }
+        if (firstNumericCol>3){
+            unit = colnames[3];
+        }
+        else {
+            unit = metricName.startsWith("lat") ? 's' : 'ops/sec';
+        }
+        if (firstNumericCol>4){
+            direction = colnames[4];
+        }
+        else {
+            direction = metricName.startsWith("lat") ? 'lower_is_better' : 'higher_is_better';
+
+        }
+
+        console.debug(firstNumericCol);
+        if (columns.length-1 == firstNumericCol) {
+            results.push({
+                testName: testName,
+                name: metricName, // metricname
+                value: Number(columns[firstNumericCol]),
+                unit: unit,
+                direction: direction,
+            });
+        }
+        else {
+            for (let k = firstNumericCol; k < columns.length; k++) {
+                metricName = colnames[k] || metricName;
+                const value = columns[k];
+                direction = metricName.startsWith("lat") ? 'lower_is_better' : 'higher_is_better';
+                results.push({
+                    testName: testName,
+                    name: metricName, // metricname
+                    value: Number(value),
+                    unit: unit,
+                    direction: direction,
+                });
+            }
+
+        }
+        core.debug('loop');
+    }
+
+    return results;
+}
+
+
 function maybeSetFailed(e: any, neverFail: boolean) {
     if (!neverFail) {
         core.setFailed(e ? e.message : 'e is undefined');
@@ -1125,6 +1237,9 @@ export async function extractResult(config: Config): Promise<Benchmark> {
             break;
         case 'gotpc':
             benches = extractGoTpcBenchmarkResult(output);
+            break;
+        case 'csv':
+            benches = extractCsvBenchmarkResult(output);
             break;
         default:
             throw new Error(`FATAL: Unexpected tool: '${tool}'`);

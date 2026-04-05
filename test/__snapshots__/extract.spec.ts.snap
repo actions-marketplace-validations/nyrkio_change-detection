@@ -456,6 +456,54 @@ exports[`extractResult() extracts benchmark output from catch2 - issue16_output.
 }
 `;
 
+exports[`extractResult() extracts benchmark output from csv - csv1.csv 1`] = `
+{
+  "benches": [
+    {
+      "direction": "lower_is_better",
+      "name": "latency",
+      "testName": "testname",
+      "unit": "ops/sec",
+      "value": 0.5,
+    },
+    {
+      "direction": "higher_is_better",
+      "name": "throughput",
+      "testName": "testname",
+      "unit": "ops/sec",
+      "value": 100,
+    },
+    {
+      "direction": "lower_is_better",
+      "name": "latency",
+      "testName": "testname",
+      "unit": "ops/sec",
+      "value": 2,
+    },
+    {
+      "direction": "higher_is_better",
+      "name": "throughput",
+      "testName": "testname",
+      "unit": "ops/sec",
+      "value": 3,
+    },
+  ],
+  "commit": {
+    "author": null,
+    "branch": "mocked_branch",
+    "committer": null,
+    "id": "123456789abcdef",
+    "message": "this is dummy",
+    "repo": "repo",
+    "repoUrl": "https://github.com/dummy/repo",
+    "timestamp": "dummy timestamp",
+    "url": "https://github.com/dummy/repo",
+  },
+  "date": 1712131503296,
+  "tool": "csv",
+}
+`;
+
 exports[`extractResult() extracts benchmark output from customBiggerIsBetter - customBiggerIsBetter_output.json 1`] = `
 {
   "benches": [

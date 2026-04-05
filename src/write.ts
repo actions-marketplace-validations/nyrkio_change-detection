@@ -93,6 +93,8 @@ function biggerIsBetter(tool: ToolType): boolean {
             return false;
         case 'nyrkioJson':
             return false; // This is needed to satisfy compiler. Never happens.
+        case 'csv':
+            return false; // Same. Actual value is in the object.
     }
 }
 

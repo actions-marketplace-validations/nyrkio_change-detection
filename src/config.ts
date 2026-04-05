@@ -53,6 +53,7 @@ export const VALID_TOOLS = [
     'customBiggerIsBetter',
     'customSmallerIsBetter',
     'nyrkioJson',
+    'csv',
 ] as const;
 const RE_UINT = /^\d+$/;
 const RE_DOUBLE = /^\d+\.\d+$/;
