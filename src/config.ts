@@ -53,6 +53,7 @@ export const VALID_TOOLS = [
     'customBiggerIsBetter',
     'customSmallerIsBetter',
     'nyrkioJson',
+    'csv',
 ] as const;
 const RE_UINT = /^\d+$/;
 const RE_DOUBLE = /^\d+\.\d+$/;
@@ -95,15 +96,9 @@ async function resolveFilePath(p: string, tool: ToolType, neverFail: boolean): P
         return '';
     }
 
-    if (tool === 'nyrkioJson') {
-        if (!s?.isDirectory()) {
-            throwValidationError(
-                neverFail,
-                `Specified path '${p}' is not a directory. nyrkioJson format expects a directory with one or more JSON files.`,
-            );
-            return '';
-        }
-    } else {
+    // nyrkioJson supports a single json file, or a directory with multiple json files.
+    // In the latter case, the files should contain the testName in attributes.testName.
+    if (tool !== 'nyrkioJson') {
         if (!s?.isFile()) {
             throwValidationError(neverFail, `Specified path '${p}' is not a file`);
             return '';
